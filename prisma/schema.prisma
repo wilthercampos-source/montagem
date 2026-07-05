@@ -1,0 +1,344 @@
+// ============================================================
+// MONTAVIEW ENTERPRISE — SCHEMA DE BANCO (ROADMAP COMPLETO)
+// Sprint 01: Login, Usuários, Configurações, Auditoria
+// Sprint 02: Importações (901/8072/8268), Processamento, Snapshot
+// Sprint 03: Dashboard, Prévia, Pré-Prévia (leem os Snapshots)
+// Sprint 04: Alerta (persistido), IndicadorDiario (histórico p/ IA)
+// Sprint 05: Replay (via Snapshot), Painel TV, Relatórios
+// Sprint 06: Integracao (Monta AI, Simulações, Integrações)
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------- ENUMS -------------------------
+
+enum PerfilUsuario {
+  USUARIO_MASTER
+  GESTOR
+  ANALISTA
+  OPERADOR
+}
+
+enum StatusUsuario {
+  ATIVO
+  INATIVO
+  BLOQUEADO
+}
+
+enum TemaAparencia {
+  CLARO
+  ESCURO
+  PERSONALIZADO
+}
+
+enum AcaoAuditoria {
+  LOGIN
+  LOGOUT
+  LOGIN_FALHO
+  LOGIN_BLOQUEADO
+  USUARIO_CRIADO
+  USUARIO_ATUALIZADO
+  USUARIO_EXCLUIDO
+  CONFIGURACAO_ALTERADA
+  IMPORTACAO_REALIZADA
+  EXPORTACAO_REALIZADA
+  ALERTA_GERADO
+  ALERTA_RESOLVIDO
+  SIMULACAO_EXECUTADA
+  INTEGRACAO_ALTERADA
+}
+
+enum SeveridadeAlerta {
+  CRITICO
+  ATENCAO
+  INFO
+}
+
+enum IntegracaoTipo {
+  ERP
+  WHATSAPP
+  EMAIL
+  POWERBI
+  WEBHOOK
+}
+
+enum RotinaImportacao {
+  ROTINA_901
+  ROTINA_8072
+  ROTINA_8268
+}
+
+enum StatusImportacao {
+  PENDENTE
+  VALIDANDO
+  VALIDADO
+  ERRO
+  PROCESSANDO
+  CONCLUIDO
+}
+
+// ------------------------- EMPRESA -------------------------
+// Uma Empresa = um tenant. Toda configuração White Label vive aqui.
+
+model Empresa {
+  id        String   @id @default(uuid())
+  nome      String
+  logoUrl   String?
+  unidade   String?
+  idioma    String   @default("pt-BR")
+  moeda     String   @default("BRL")
+
+  // Aparência / White Label
+  tema           TemaAparencia @default(ESCURO)
+  corPrimaria    String        @default("#F2A93B")
+  corSecundaria  String        @default("#2BC4B0")
+  corFundo       String        @default("#0B1220")
+  corCartoes     String        @default("#121B2E")
+  corTexto       String        @default("#E8ECF4")
+
+  // Política de segurança (configurável por empresa)
+  loginMaxTentativas Int @default(3)
+  loginBloqueioSeg   Int @default(10)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  usuarios   Usuario[]
+  auditorias Auditoria[]
+  importacoes Importacao[]
+  snapshots   Snapshot[]
+  alertas     Alerta[]
+  indicadoresDiarios IndicadorDiario[]
+  integracoes Integracao[]
+
+  @@map("empresas")
+}
+
+// ------------------------- USUÁRIO -------------------------
+
+model Usuario {
+  id           String        @id @default(uuid())
+  empresaId    String
+  empresa      Empresa       @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  nome         String
+  email        String        @unique
+  senhaHash    String
+  perfil       PerfilUsuario @default(ANALISTA)
+  departamento String?
+  fotoUrl      String?
+  status       StatusUsuario @default(ATIVO)
+
+  // Controle de bloqueio de login
+  tentativasFalhas   Int       @default(0)
+  bloqueadoAte       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditorias     Auditoria[]
+  tentativasLogin TentativaLogin[]
+  importacoes     Importacao[]
+  alertasResolvidos Alerta[]
+
+  @@index([empresaId])
+  @@map("usuarios")
+}
+
+// ------------------------- TENTATIVAS DE LOGIN -------------------------
+// Toda tentativa (sucesso ou falha) é registrada aqui, mesmo antes
+// de o usuário existir (ex: e-mail incorreto), para fins de auditoria
+// e detecção de força bruta.
+
+model TentativaLogin {
+  id         String   @id @default(uuid())
+  usuarioId  String?
+  usuario    Usuario? @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  emailUsado String
+  sucesso    Boolean
+  ip         String
+  userAgent  String
+  sistemaOperacional String?
+  navegador          String?
+
+  createdAt DateTime @default(now())
+
+  @@index([usuarioId])
+  @@index([emailUsado])
+  @@map("tentativas_login")
+}
+
+// ------------------------- AUDITORIA -------------------------
+// Registro imutável de tudo que acontece no sistema (nunca é apagado).
+
+model Auditoria {
+  id        String        @id @default(uuid())
+  empresaId String
+  empresa   Empresa       @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  usuarioId String?
+  usuario   Usuario?      @relation(fields: [usuarioId], references: [id], onDelete: SetNull)
+
+  acao      AcaoAuditoria
+  detalhes  Json?
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([empresaId, createdAt])
+  @@index([usuarioId])
+  @@map("auditoria")
+}
+
+// ------------------------- IMPORTAÇÃO (SPRINT 02) -------------------------
+// Cada arquivo recebido do ERP (rotinas 901, 8072, 8268) gera um registro
+// aqui. O ciclo de vida é: PENDENTE -> VALIDANDO -> VALIDADO/ERRO ->
+// PROCESSANDO -> CONCLUIDO. Ao concluir, gera um Snapshot imutável.
+
+model Importacao {
+  id        String            @id @default(uuid())
+  empresaId String
+  empresa   Empresa           @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  criadoPorId String?
+  criadoPor   Usuario?        @relation(fields: [criadoPorId], references: [id], onDelete: SetNull)
+
+  rotina        RotinaImportacao
+  nomeArquivo   String
+  tamanhoBytes  Int?
+  status        StatusImportacao @default(PENDENTE)
+  totalRegistros Int?
+  erros         Json?
+  dadosValidados Json? // linhas parseadas, aguardando processamento -> Snapshot
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  snapshot Snapshot?
+
+  @@index([empresaId, createdAt])
+  @@index([empresaId, rotina])
+  @@map("importacoes")
+}
+
+// ------------------------- SNAPSHOT (SPRINT 02) -------------------------
+// Fotografia imutável dos dados consolidados de uma importação concluída.
+// Nunca é apagado (Motor Histórico) — alimenta Replay, Timeline,
+// Comparativos e IA nos próximos sprints.
+
+model Snapshot {
+  id           String     @id @default(uuid())
+  empresaId    String
+  empresa      Empresa    @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  importacaoId String     @unique
+  importacao   Importacao @relation(fields: [importacaoId], references: [id], onDelete: Cascade)
+
+  codigo String  @unique // ex: SNAP-0231
+  dados  Json    // payload consolidado (linhas processadas, agregados, etc.)
+
+  createdAt DateTime @default(now())
+
+  @@index([empresaId, createdAt])
+  @@map("snapshots")
+}
+
+// ------------------------- ALERTA (SPRINT 04) -------------------------
+// Gerado automaticamente pelo Motor de Decisão quando uma cidade foge da
+// meta esperada. Persistido (não é só um cálculo em memória) para permitir
+// histórico, resolução manual e auditoria de quem resolveu e quando.
+
+model Alerta {
+  id        String            @id @default(uuid())
+  empresaId String
+  empresa   Empresa           @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  cidade     String
+  severidade SeveridadeAlerta
+  mensagem   String
+
+  resolvido      Boolean   @default(false)
+  resolvidoPorId String?
+  resolvidoPor   Usuario?  @relation(fields: [resolvidoPorId], references: [id], onDelete: SetNull)
+  resolvidoEm    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([empresaId, resolvido])
+  @@index([empresaId, cidade])
+  @@map("alertas")
+}
+
+// ------------------------- INDICADOR DIÁRIO (SPRINT 04) -------------------------
+// Fotografia diária de fechamento por cidade (alimentada pela Rotina 8268).
+// É a base do histórico de 30 dias usado pelo Motor de Decisão para calcular
+// Meta Inteligente, Confiabilidade e o DNA Operacional. Nunca é apagado.
+
+model IndicadorDiario {
+  id        String   @id @default(uuid())
+  empresaId String
+  empresa   Empresa  @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  cidade          String
+  data            DateTime @db.Date
+  cargasTotais    Int
+  cargasConcluidas Int
+  percentualFinal Int
+  atrasado        Boolean
+
+  createdAt DateTime @default(now())
+
+  @@unique([empresaId, cidade, data])
+  @@index([empresaId, data])
+  @@map("indicadores_diarios")
+}
+
+// ------------------------- INTEGRAÇÃO (SPRINT 06) -------------------------
+// Cada linha representa uma integração externa configurável (ERP, WhatsApp,
+// e-mail, Power BI, Webhooks). `configuracao` guarda campos específicos de
+// cada tipo (ex: URL do webhook, credenciais de SMTP) como JSON — schema
+// flexível o suficiente para novos tipos sem migração.
+
+model Integracao {
+  id        String         @id @default(uuid())
+  empresaId String
+  empresa   Empresa        @relation(fields: [empresaId], references: [id], onDelete: Cascade)
+
+  tipo         IntegracaoTipo
+  nome         String
+  conectado    Boolean        @default(false)
+  configuracao Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([empresaId, tipo])
+  @@map("integracoes")
+}
+
+// ============================================================
+// ROADMAP COMPLETO — TODOS OS 6 SPRINTS DO PROMPT MESTRE
+// ------------------------------------------------------------
+// Sprint 01 — Login, Usuários, Configurações, Auditoria
+// Sprint 02 — Importações, Processamento, Snapshot
+// Sprint 03 — Dashboard, Prévia, Pré-Prévia
+// Sprint 04 — Alerta, IndicadorDiario (Inteligência Operacional)
+// Sprint 05 — Replay (via Snapshot), Painel TV, Relatórios
+// Sprint 06 — Integracao (Monta AI, Simulações, Integrações)
+//
+// Pendências conscientes para uma futura v2 (fora do escopo do prompt
+// mestre original, mas registradas para referência):
+//   - PermissaoIndividual (permissões granulares por usuário)
+//   - Exportação em PNG via navegador headless (Puppeteer/Playwright)
+//   - Motor de IA real (LLM) substituindo a versão por palavras-chave
+//   - Job agendado para geração periódica de Alertas (hoje é sob demanda)
+// ============================================================
