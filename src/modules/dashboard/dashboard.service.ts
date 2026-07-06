@@ -24,6 +24,45 @@ interface CidadeAgregada {
   prioridade: number;
 }
 
+interface DashboardIndicadores {
+  saudeOperacional: { label: string; cor: string };
+  percentualGeral: number;
+  metaInteligente: number;
+  metaEsperadaParaHorario: number;
+  previsaoEncerramento: string;
+  confiabilidade: number;
+}
+
+interface DashboardAlerta { cidade: string; percentual: number; mensagem: string }
+interface DashboardLinhaDoTempo { hora: Date; usuario: string; acao: string; detalhes: unknown }
+
+export type DashboardResultado =
+  | { possuiDados: false; mensagem: string }
+  | {
+      possuiDados: true;
+      indicadores: DashboardIndicadores;
+      radarOperacional: CidadeAgregada[];
+      ranking: CidadeAgregada[];
+      alertas: DashboardAlerta[];
+      comparativo: { hojePercentual: number; ontemPercentual: number | null };
+      resumoIA: string;
+      linhaDoTempo: DashboardLinhaDoTempo[];
+    };
+
+export type PreviaResultado =
+  | { possuiDados: false; resumo: { emAndamento: 0; concluidas: 0; atrasadas: 0 }; cidades: [] }
+  | {
+      possuiDados: true;
+      resumo: { emAndamento: number; concluidas: number; atrasadas: number };
+      cidades: CidadeAgregada[];
+    };
+
+interface PrePreviaLinha { cidade: string; volumeEsperado: number; cargasProgramadas: number; demanda: "Alta" | "Média" | "Baixa" }
+
+export type PrePreviaResultado =
+  | { possuiDados: false; mensagem: string }
+  | { possuiDados: true; data: string; cidades: PrePreviaLinha[] };
+
 /**
  * Monta a visão por cidade combinando o cadastro de cargas (Rotina 901)
  * com o status de montagem (Rotina 8072) do snapshot mais recente de cada.
@@ -72,7 +111,7 @@ async function montarVisaoPorCidade(empresaId: string): Promise<CidadeAgregada[]
   return resultado;
 }
 
-export async function obterDashboard(empresaId: string) {
+export async function obterDashboard(empresaId: string): Promise<DashboardResultado> {
   const cidades = await montarVisaoPorCidade(empresaId);
 
   if (cidades.length === 0) {
@@ -141,10 +180,15 @@ export async function obterDashboard(empresaId: string) {
   };
 }
 
-export async function obterPrevia(empresaId: string) {
+export async function obterPrevia(empresaId: string): Promise<PreviaResultado> {
   const cidades = await montarVisaoPorCidade(empresaId);
+
+  if (cidades.length === 0) {
+    return { possuiDados: false, resumo: { emAndamento: 0, concluidas: 0, atrasadas: 0 }, cidades: [] };
+  }
+
   return {
-    possuiDados: cidades.length > 0,
+    possuiDados: true,
     resumo: {
       emAndamento: cidades.filter((c) => !c.atraso && c.percentual < 100).length,
       concluidas: cidades.filter((c) => c.percentual >= 100).length,
@@ -160,7 +204,7 @@ export async function obterPrevia(empresaId: string) {
  * cruza com dados da operação atual (Rotina 8072), conforme especificação
  * ("nunca interferir na operação atual").
  */
-export async function obterPrePrevia(empresaId: string) {
+export async function obterPrePrevia(empresaId: string): Promise<PrePreviaResultado> {
   const snap901 = await ultimoSnapshot(empresaId, "ROTINA_901");
   if (!snap901) {
     return { possuiDados: false, mensagem: "Importe a Rotina 901 para visualizar o planejamento do dia seguinte." };
@@ -173,18 +217,18 @@ export async function obterPrePrevia(empresaId: string) {
   const registros = (snap901.dados as unknown as Registro901[]) ?? [];
   const programadasAmanha = registros.filter((r) => (r.dataProgramada ?? "").startsWith(amanhaStr));
 
+  if (programadasAmanha.length === 0) {
+    return { possuiDados: false, mensagem: "Nenhuma carga programada para amanhã na Rotina 901 ainda." };
+  }
+
   const porCidade = agruparPorCidade(programadasAmanha);
-  const linhas = Array.from(porCidade.entries()).map(([cidade, cargas]) => {
+  const linhas: PrePreviaLinha[] = Array.from(porCidade.entries()).map(([cidade, cargas]) => {
     const volumeEsperado = cargas.reduce((acc, c) => acc + (Number(c.volumePrevisto) || 0), 0);
-    return {
-      cidade,
-      volumeEsperado,
-      cargasProgramadas: cargas.length,
-      demanda: volumeEsperado >= 30 ? "Alta" : volumeEsperado >= 15 ? "Média" : "Baixa",
-    };
+    const demanda: PrePreviaLinha["demanda"] = volumeEsperado >= 30 ? "Alta" : volumeEsperado >= 15 ? "Média" : "Baixa";
+    return { cidade, volumeEsperado, cargasProgramadas: cargas.length, demanda };
   });
 
-  return { possuiDados: linhas.length > 0, data: amanhaStr, cidades: linhas };
+  return { possuiDados: true, data: amanhaStr, cidades: linhas };
 }
 
 function mediaPercentual(registros: Registro8072[]): number {
